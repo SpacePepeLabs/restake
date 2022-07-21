@@ -1,15 +1,18 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import _ from 'lodash'
 
 import {
   Form,
   Button
 } from 'react-bootstrap'
+import { MsgVote } from "cosmjs-types/cosmos/gov/v1beta1/tx.js";
+
 import Vote from '../utils/Vote.mjs';
+import { buildExecMessage } from '../utils/Helpers.mjs';
 
 
 function VoteForm(props) {
-  const { proposal, vote, address, setError } = props
+  const { proposal, vote, address, wallet, granter, setError } = props
   const { proposal_id } = proposal
 
   const choices = {
@@ -26,12 +29,12 @@ function VoteForm(props) {
     'VOTE_OPTION_ABSTAIN': 2
   }
 
-  const [choice, setChoice] = useState()
+  const [choice, setChoice] = useState(vote?.option)
   const [loading, setLoading] = useState()
 
-  if (vote && !choice) {
-    setChoice(vote.option)
-  }
+  useEffect(() => {
+    setChoice(vote?.option)
+  }, [vote])
 
   function handleVoteChange(event) {
     setChoice(event.target.name)
@@ -49,7 +52,7 @@ function VoteForm(props) {
 
     const newVote = Vote({
       proposal_id: proposal_id,
-      voter: address,
+      voter: granter || wallet.address,
       option: choice,
       options: [
         {
@@ -59,18 +62,27 @@ function VoteForm(props) {
       ]
     })
 
-    const message = {
-      typeUrl: "/cosmos.gov.v1beta1.MsgVote",
-      value: {
-        proposalId: proposal.proposal_id,
-        voter: address,
-        option: newVote.optionValue
+    let message
+    const value = {
+      proposalId: proposal.proposal_id,
+      voter: newVote.voter,
+      option: newVote.optionValue
+    }
+    if(granter){
+      message = buildExecMessage(wallet.address, [{
+        typeUrl: "/cosmos.gov.v1beta1.MsgVote",
+        value: MsgVote.encode(MsgVote.fromPartial(value)).finish()
+      }])
+    }else{
+      message = {
+        typeUrl: "/cosmos.gov.v1beta1.MsgVote",
+        value: value
       }
     }
 
     console.log(message)
 
-    props.stargateClient.signAndBroadcast(address, [message]).then((result) => {
+    props.stargateClient.signAndBroadcast(wallet.address, [message]).then((result) => {
       console.log("Successfully broadcasted:", result);
       setLoading(false)
       setError(null)
@@ -85,7 +97,8 @@ function VoteForm(props) {
   const voteChanged = vote && vote.option !== choice
 
   function canVote() {
-    if (!address || !proposal.isVoting) return false
+    if (!wallet.address || !proposal.isVoting) return false
+    if (!wallet.hasPermission(granter || wallet.address, 'Vote')) return false
 
     return choice && (!vote || (vote && voteChanged))
   }
@@ -113,7 +126,7 @@ function VoteForm(props) {
                           <Form.Check.Input type='radio'
                             name={key}
                             checked={key === choice}
-                            disabled={!proposal.isVoting}
+                            disabled={!proposal.isVoting || !wallet?.hasPermission(granter || wallet.address, 'Vote')}
                             onChange={handleVoteChange}
                           />
                           <Form.Check.Label className="d-block text-nowrap">

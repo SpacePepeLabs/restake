@@ -1,13 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import _ from 'lodash'
 import FuzzySearch from 'fuzzy-search'
-import { Bech32 } from '@cosmjs/encoding'
 
 import { format, add } from 'mathjs'
 
 import Coins from "./Coins";
 import ClaimRewards from "./ClaimRewards";
-import RevokeRestake from "./RevokeRestake";
+import RevokeGrant from "./RevokeGrant";
 import ValidatorImage from './ValidatorImage'
 import TooltipIcon from './TooltipIcon'
 
@@ -18,18 +17,21 @@ import {
   Dropdown, 
   OverlayTrigger, 
   Tooltip,
-  Nav
+  Nav,
+  Spinner
 } from 'react-bootstrap'
-import { FilterSquare, XCircle } from "react-bootstrap-icons";
+import { XCircle } from "react-bootstrap-icons";
 
 import ValidatorName from "./ValidatorName";
 import ManageRestake from "./ManageRestake";
 
 function Validators(props) {
-  const { address, network, validators, operators, delegations, operatorGrants } = props
+  const { address, wallet, network, validators, operators, delegations, operatorGrants } = props
 
   const [filter, setFilter] = useState({keywords: '', status: 'active', group: 'delegated'})
   const [results, setResults] = useState([])
+
+  const showCommission = results && Object.values(results).find(el => el.isValidatorOperator(address))
 
   useEffect(() => {
     if(delegations && filter.group !== 'delegated'){
@@ -122,14 +124,6 @@ function Validators(props) {
     return validators
   }
 
-  function isValidatorOperator(validator) {
-    if (!address || !validator || !window.atob) return false;
-
-    const prefix = network.prefix
-    const validatorOperator = Bech32.encode(prefix, Bech32.decode(validator.operator_address).data)
-    return validatorOperator === address
-  }
-
   function operatorForValidator(validatorAddress) {
     return operators.find((el) => el.address === validatorAddress);
   }
@@ -137,11 +131,15 @@ function Validators(props) {
   function renderValidator(validator) {
     const validatorAddress = validator.operator_address
     const delegation = delegations[validatorAddress];
-    const validatorOperator = isValidatorOperator(validator)
+    const validatorOperator = validator.isValidatorOperator(address)
     const rewards =
       props.rewards && props.rewards[validatorAddress];
     const denomRewards = rewards && rewards.reward.find(
       (reward) => reward.denom === network.denom
+    );
+    const commission = props.commission && props.commission[validatorAddress]
+    const denomCommission = commission && commission.commission.find(
+      (commission) => commission.denom === network.denom
     );
     const operator = operatorForValidator(validatorAddress);
     const grants = operator && operatorGrants[operator.botAddress]
@@ -175,17 +173,25 @@ function Validators(props) {
           </span>
         </td>
         <td className="d-none d-sm-table-cell text-center">
-          <ManageRestake
-            size="sm"
-            network={network}
-            validator={validator}
-            operator={operator}
-            grants={grants}
-            delegation={delegation}
-            authzSupport={props.authzSupport}
-            restakePossible={props.restakePossible}
-            openGrants={() => props.showValidator(validator, { activeTab: 'restake' })}
-          />
+          {!props.isLoading ? (
+            <ManageRestake
+              size="sm"
+              disabled={!wallet?.hasPermission(address, 'Grant')}
+              network={network}
+              validator={validator}
+              operator={operator}
+              grants={grants}
+              delegation={delegation}
+              isLoading={props.isLoading}
+              authzSupport={props.authzSupport}
+              restakePossible={props.restakePossible}
+              openGrants={() => props.showValidator(validator, { activeTab: 'restake' })}
+            />
+          ) : (
+            <Spinner animation="border" role="status" className="spinner-border-sm text-secondary">
+              <span className="visually-hidden">Loading...</span>
+            </Spinner>
+          )}
         </td>
         <td className="d-none d-lg-table-cell text-center">
           {operator && (
@@ -246,6 +252,19 @@ function Validators(props) {
             )}
           </td>
         )}
+        {!props.modal && showCommission && (
+          <td className="d-none d-md-table-cell">
+            {denomCommission && (
+              <small>
+                <Coins
+                  key={denomCommission.denom}
+                  coins={denomCommission}
+                  decimals={network.decimals}
+                />
+              </small>
+            )}
+          </td>
+        )}
         <td>
           <div className="d-grid gap-2 d-md-flex justify-content-end">
             {props.manageButton ? (
@@ -266,14 +285,16 @@ function Validators(props) {
                     {operator &&
                       props.restakePossible && (
                         <>
-                          <Dropdown.Item onClick={() => props.showValidator(validator, { activeTab: 'restake' })}>
+                          <Dropdown.Item disabled={!wallet?.hasPermission(address, 'Grant') || !wallet?.hasPermission(address, 'Revoke')} onClick={() => props.showValidator(validator, { activeTab: 'restake' })}>
                             {grants.grantsValid ? 'Manage REStake' : 'Enable REStake'}
                           </Dropdown.Item>
                           {grants.grantsExist && (
-                            <RevokeRestake
+                            <RevokeGrant
                               address={props.address}
-                              operator={operator}
-                              grants={grants}
+                              wallet={props.wallet}
+                              grantAddress={operator.botAddress}
+                              grants={[grants.stakeGrant, grants.claimGrant]}
+                              buttonText="Disable REStake"
                               stargateClient={props.stargateClient}
                               onRevoke={props.onRevoke}
                               setLoading={(loading) =>
@@ -291,6 +312,7 @@ function Validators(props) {
                     <ClaimRewards
                       network={network}
                       address={address}
+                      wallet={wallet}
                       validatorRewards={props.validatorRewards([validatorAddress])}
                       stargateClient={props.stargateClient}
                       onClaimRewards={props.onClaimRewards}
@@ -303,6 +325,7 @@ function Validators(props) {
                       restake={true}
                       network={network}
                       address={address}
+                      wallet={wallet}
                       validatorRewards={props.validatorRewards([validatorAddress])}
                       stargateClient={props.stargateClient}
                       onClaimRewards={props.onClaimRewards}
@@ -318,6 +341,7 @@ function Validators(props) {
                           commission={true}
                           network={network}
                           address={address}
+                          wallet={wallet}
                           validatorRewards={props.validatorRewards([validatorAddress])}
                           stargateClient={props.stargateClient}
                           onClaimRewards={props.onClaimRewards}
@@ -329,13 +353,13 @@ function Validators(props) {
                       </>
                     )}
                     <hr />
-                    <Dropdown.Item onClick={() => props.showValidator(validator, { activeTab: 'delegate' })}>
+                    <Dropdown.Item disabled={!wallet?.hasPermission(address, 'Delegate')} onClick={() => props.showValidator(validator, { activeTab: 'delegate' })}>
                       Delegate
                     </Dropdown.Item>
-                    <Dropdown.Item onClick={() => props.showValidator(validator, { redelegate: true })}>
+                    <Dropdown.Item disabled={!wallet?.hasPermission(address, 'BeginRedelegate')} onClick={() => props.showValidator(validator, { redelegate: true })}>
                       Redelegate
                     </Dropdown.Item>
-                    <Dropdown.Item onClick={() => props.showValidator(validator, { undelegate: true })}>
+                    <Dropdown.Item disabled={!wallet?.hasPermission(address, 'Undelegate')} onClick={() => props.showValidator(validator, { undelegate: true })}>
                       Undelegate
                     </Dropdown.Item>
                   </Dropdown.Menu>
@@ -349,7 +373,7 @@ function Validators(props) {
                     </Tooltip>
                   }
                 >
-                  <Button variant="primary" size="sm" onClick={() => props.showValidator(validator, { activeTab: 'delegate' })}>
+                  <Button variant="primary" size="sm" disabled={!wallet?.hasPermission(address, 'Delegate')} onClick={() => props.showValidator(validator, { activeTab: 'delegate' })}>
                     Delegate
                   </Button>
                 </OverlayTrigger>
@@ -423,7 +447,6 @@ function Validators(props) {
             <option value="inactive">Inactive</option>
             <option value="all">All</option>
           </select>
-          {/* <FilterSquare size={30} className="ms-3" /> */}
         </div>
       </div>
       {results.length > 0 &&
@@ -453,6 +476,9 @@ function Validators(props) {
               <th className="d-none d-sm-table-cell">Delegation</th>
               {!props.modal && (
                 <th className="d-none d-md-table-cell">Rewards</th>
+              )}
+              {!props.modal && showCommission && (
+                <th className="d-none d-md-table-cell">Commission</th>
               )}
               <th></th>
             </tr>
@@ -496,6 +522,25 @@ function Validators(props) {
                             if (!reward) return sum
 
                             return add(sum, reward.amount)
+                          }, 0),
+                          denom: network.denom
+                        }}
+                        decimals={network.decimals} />
+                    </strong>
+                  )}
+                </td>
+              )}
+              {!props.modal && showCommission && (
+                <td className="d-none d-md-table-cell">
+                  {props.commission && (
+                    <strong className="small">
+                      <Coins
+                        coins={{
+                          amount: results.reduce((sum, result) => {
+                            const commission = props.commission[result.operator_address]?.commission?.find(el => el.denom === network.denom)
+                            if (!commission) return sum
+
+                            return add(sum, commission.amount)
                           }, 0),
                           denom: network.denom
                         }}

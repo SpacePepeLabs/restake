@@ -30,6 +30,10 @@ function ProposalModal(props) {
             tally={tally}
             vote={vote}
             address={props.address}
+            wallet={props.wallet}
+            granters={props.granters}
+            favouriteAddresses={props.favouriteAddresses}
+            queryClient={props.queryClient}
             stargateClient={props.stargateClient}
             onVote={props.onVote} />
         </Modal.Body>

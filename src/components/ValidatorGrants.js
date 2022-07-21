@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import moment from 'moment'
 import { pow, multiply, divide, larger, smaller, bignumber } from 'mathjs'
 
-import { GenericAuthorization } from "cosmjs-types/cosmos/authz/v1beta1/authz";
+import { MsgGrant } from "cosmjs-types/cosmos/authz/v1beta1/tx";
 import { StakeAuthorization } from "cosmjs-types/cosmos/staking/v1beta1/authz";
 import { Timestamp } from "cosmjs-types/google/protobuf/timestamp";
 
@@ -13,12 +13,12 @@ import {
 } from 'react-bootstrap'
 
 import Coins from './Coins';
-import { coin } from '../utils/Helpers.mjs';
-import RevokeRestake from './RevokeRestake';
+import { buildExecMessage, coin } from '../utils/Helpers.mjs';
+import RevokeGrant from './RevokeGrant';
 import AlertMessage from './AlertMessage';
 
 function ValidatorGrants(props) {
-  const { grants, operator, address, network } = props
+  const { grants, wallet, operator, address, network } = props
   const { stakeGrant, maxTokens, validators, grantsValid, grantsExist } = grants || {}
   const defaultExpiry = moment().add(1, 'year')
   const [loading, setLoading] = useState(false);
@@ -88,10 +88,19 @@ function ValidatorGrants(props) {
     ]
     console.log(messages)
 
-    props.stargateClient.signAndBroadcast(address, messages).then((result) => {
+    props.stargateClient.signAndBroadcast(wallet.address, messages).then((result) => {
       console.log("Successfully broadcasted:", result);
       showLoading(false)
-      props.onGrant(operator, moment().diff(expiry, "seconds") >= 0, maxTokens);
+      props.onGrant(operator.botAddress, {
+        grantee: operator.botAddress,
+        granter: address,
+        expiration: expiry,
+        authorization: {
+          '@type': "/cosmos.staking.v1beta1.StakeAuthorization",
+          max_tokens: maxTokens,
+          allow_list: { address: [operator.address] }
+        }
+      });
     }, (error) => {
       console.log('Failed to broadcast:', error)
       showLoading(false)
@@ -99,23 +108,31 @@ function ValidatorGrants(props) {
     })
   }
 
-  function buildGrantMsg(type, value, expiryDate) {
-    return {
-      typeUrl: "/cosmos.authz.v1beta1.MsgGrant",
-      value: {
-        granter: address,
-        grantee: operator.botAddress,
-        grant: {
-          authorization: {
-            typeUrl: type,
-            value: value
-          },
-          expiration: Timestamp.fromPartial({
-            seconds: expiryDate.unix(),
-            nanos: 0
-          })
-        }
-      },
+  function buildGrantMsg(type, authValue, expiryDate) {
+    const value = {
+      granter: address,
+      grantee: operator.botAddress,
+      grant: {
+        authorization: {
+          typeUrl: type,
+          value: authValue
+        },
+        expiration: Timestamp.fromPartial({
+          seconds: expiryDate.unix(),
+          nanos: 0
+        })
+      }
+    }
+    if(wallet?.address !== address){
+      return buildExecMessage(wallet.address, [{
+        typeUrl: "/cosmos.authz.v1beta1.MsgGrant",
+        value: MsgGrant.encode(MsgGrant.fromPartial(value)).finish()
+      }])
+    }else{
+      return {
+        typeUrl: "/cosmos.authz.v1beta1.MsgGrant",
+        value: value
+      }
     }
   }
 
@@ -238,18 +255,20 @@ function ValidatorGrants(props) {
                   ? (
                     <>
                       {grants.grantsExist && (
-                        <RevokeRestake
+                        <RevokeGrant
                           button={true}
                           address={address}
+                          wallet={wallet}
                           operator={operator}
-                          grants={grants}
+                          grants={[grants.stakeGrant, grants.claimGrant]}
+                          grantAddress={operator.botAddress}
                           stargateClient={props.stargateClient}
                           onRevoke={props.onRevoke}
                           setLoading={(loading) => showLoading(loading)}
                           setError={setError}
                         />
                       )}
-                      <Button type="submit" className="btn btn-primary ms-2">{grants.grantsExist ? 'Update REStake' : 'Enable REStake'}</Button>
+                      <Button type="submit" disabled={!wallet?.hasPermission(address, 'Grant')} className="btn btn-primary ms-2">{grants.grantsExist ? 'Update REStake' : 'Enable REStake'}</Button>
                     </>
                   )
                   : <Button className="btn btn-primary" type="button" disabled>

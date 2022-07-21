@@ -14,7 +14,7 @@ import Validators from "./Validators";
 class Delegations extends React.Component {
   constructor(props) {
     super(props);
-    this.state = { operatorGrants: {}, validatorLoading: {}, validatorApy: {}, validatorModal: {} };
+    this.state = { operatorGrants: {}, validatorLoading: {}, validatorApy: {}, validatorModal: {}, commission: {} };
 
     this.setError = this.setError.bind(this);
     this.setClaimLoading = this.setClaimLoading.bind(this);
@@ -35,11 +35,9 @@ class Delegations extends React.Component {
   }
 
   async componentDidMount() {
-    const isNanoLedger = this.props.stargateClient?.getIsNanoLedger();
+    const isNanoLedger = this.props.wallet?.getIsNanoLedger();
     this.setState({ isNanoLedger: isNanoLedger });
-    await this.getDelegations()
-    this.getGrants(true)
-    this.refresh();
+    this.refresh(true);
 
     if (this.props.validator) {
       this.showValidatorModal(this.props.validator)
@@ -54,26 +52,21 @@ class Delegations extends React.Component {
     if ((this.props.network !== prevProps.network && !this.props.address)
       || (this.props.address !== prevProps.address)) {
       this.clearRefreshInterval()
-      const isNanoLedger = this.props.stargateClient?.getIsNanoLedger();
+      const isNanoLedger = this.props.wallet?.getIsNanoLedger();
       this.setState({
         isNanoLedger: isNanoLedger,
         delegations: undefined, 
+        rewards: undefined,
+        commission: {},
         validatorApy: {},
         operatorGrants: {},
         error: null,
       });
-      await this.getDelegations()
-      this.refresh();
-      if(this.state.delegations){
-        return this.getGrants(true)
-      }
+      this.refresh(false);
     }
 
-    if (this.state.delegations && prevState.delegations){
-      const delegationsChanged = _.difference(Object.keys(this.state.delegations), Object.keys(prevState.delegations || {})).length > 0
-      if (delegationsChanged) {
-        this.getGrants(true)
-      }
+    if (this.props.grants !== prevProps.grants){
+      this.getGrants()
     }
   }
 
@@ -81,8 +74,12 @@ class Delegations extends React.Component {
     this.clearRefreshInterval()
   }
 
-  async refresh() {
+  async refresh(getGrants) {
     this.calculateApy();
+    await this.getDelegations()
+    if (getGrants){
+      this.getGrants()
+    }
     this.getWithdrawAddress();
     this.getRewards();
     this.refreshInterval();
@@ -96,22 +93,19 @@ class Delegations extends React.Component {
     const delegateInterval = setInterval(() => {
       this.getDelegations(true)
     }, 30_000)
-    const grantInterval = setInterval(() => {
-      this.getGrants(true);
-    }, 60_000);
-    this.setState({ refreshInterval, delegateInterval, grantInterval });
+    this.setState({ refreshInterval, delegateInterval });
   }
 
   clearRefreshInterval(){
     clearInterval(this.state.refreshInterval);
     clearInterval(this.state.delegateInterval);
-    clearInterval(this.state.grantInterval);
   }
 
   async getDelegations(hideError) {
     if(!this.props.address) return
+    const address = this.props.address
 
-    return this.props.queryClient.getDelegations(this.props.address)
+    return this.props.queryClient.getDelegations(address)
       .then(
         (delegations) => {
           const orderedAddresses = Object.keys(this.props.validators)
@@ -121,18 +115,22 @@ class Delegations extends React.Component {
             }
             return sum
           }, {})
-          this.setState({
-            delegations: delegations,
-          });
+          if(address === this.props.address){
+            this.setState({
+              delegations: delegations,
+            });
+          }
         },
         (error) => {
+          if(address !== this.props.address) return
+
           if([404, 500].includes(error.response && error.response.status)){
             this.setState({
               delegations: {},
             });
           }else if(!hideError){
             this.setState({
-              error: 'Failed to load delegations. API may be down.',
+              error: 'Failed to load delegations.',
             });
           }
         }
@@ -141,11 +139,15 @@ class Delegations extends React.Component {
 
   async getWithdrawAddress() {
     if(!this.props.address) return
+    const address = this.props.address
 
-    const withdraw = await this.props.queryClient.getWithdrawAddress(this.props.address)
-    if (withdraw !== this.props.address) {
-      this.setState({ error: 'You have a different withdraw address set. REStake WILL NOT WORK!' })
-    }
+    return this.props.queryClient.getWithdrawAddress(address).then(withdraw => {
+      if (withdraw !== address) {
+        this.setState({ error: 'You have a different withdraw address set. REStake WILL NOT WORK!' })
+      }
+    }, error => {
+      console.log('Failed to get withdraw address', error)
+    })
   }
 
   getRewards(hideError) {
@@ -162,10 +164,24 @@ class Delegations extends React.Component {
             this.setState({ rewards: {} });
           } else {
             if (!hideError)
-              this.setState({ error: "Failed to get rewards. Please refresh" });
+              this.setState({ error: "Failed to get rewards." });
           }
         }
       );
+
+    Object.values(this.props.validators).forEach(validator => {
+      if(validator.isValidatorOperator(this.props.address)){
+        this.props.queryClient.getCommission(validator.address).then((commission) => {
+          this.setState((state, props) => ({
+            commission: _.set(
+              state.commission,
+              validator.address,
+              commission
+            ),
+          }));
+        })
+      }
+    })
   }
 
   async calculateApy() {
@@ -178,43 +194,19 @@ class Delegations extends React.Component {
       this.setState({ validatorApy });
     }, error => {
       console.log(error)
-      this.setState({ error: "Failed to get APY. Please refresh" });
+      this.setState({ error: "Failed to get APY." });
     })
   }
 
-  async getGrants(hideError) {
-    if (!this.props.address || !this.authzSupport() || !this.props.operators.length) return
+  async getGrants() {
+    if (!this.props.grants?.granter) return
 
-    let allGrants
-    try {
-      allGrants = await this.props.queryClient.getGranterGrants(this.props.address)
-      this.setAllGrants(allGrants, this.props.operators, this.props.address)
-      return
-    } catch (e) { console.log('Failed to get all grants in batch') }
-
-    const calls = this.orderedOperators().map((operator) => {
-      return () => {
-        const { botAddress } = operator;
-        if (!this.props.address || !this.props.operators.includes(operator)) return;
-
-        return this.props.queryClient.getGrants(botAddress, this.props.address).then(
-          (result) => {
-            this.setGrants(result, botAddress, this.props.address)
-          },
-          (error) => {
-            if (!hideError) {
-              this.setState({ error: "Failed to get grants. Please refresh" });
-            }
-          }
-        );
-      }
-    });
-
-    const batchCalls = _.chunk(calls, 5);
-
-    for (const batchCall of batchCalls) {
-      await Promise.allSettled(batchCall.map(call => call()))
-    }
+    const operatorGrants = this.props.operators.reduce((sum, operator) => {
+      const grantee = operator.botAddress
+      sum[grantee] = this.buildGrants(this.props.grants.granter, grantee, this.props.address)
+      return sum
+    }, {})
+    this.setState({operatorGrants: operatorGrants})
   }
 
   buildGrants(grants, grantee, granter){
@@ -233,57 +225,24 @@ class Delegations extends React.Component {
     };
   }
 
-  setAllGrants(grants, operators, granter){
-    const operatorGrants = operators.reduce((sum, operator) => {
-      const grantee = operator.botAddress
-      sum[grantee] = this.buildGrants(grants, grantee, granter)
-      return sum
-    }, {})
-    this.setState({operatorGrants: operatorGrants})
+  onGrant(grantAddress, grant) {
+    const operator = this.props.operators.find(el => el.botAddress === grantAddress)
+    if(operator){
+      this.setState((state, props) => ({
+        error: null,
+        validatorLoading: _.set(state.validatorLoading, operator.address, false),
+      }));
+    }
+    this.props.onGrant(grantAddress, grant)
   }
 
-  setGrants(grants, grantee, granter){
-    const operatorGrant = this.buildGrants(grants, grantee, granter)
+  onRevoke(grantAddress, msgTypes) {
+    const operator = this.props.operators.find(el => el.botAddress === grantAddress)
     this.setState((state, props) => ({
-      operatorGrants: _.set(
-        state.operatorGrants,
-        grantee,
-        operatorGrant
-      ),
-    }));
-  }
-
-  onGrant(operator, expired, maxTokens) {
-    this.clearRefreshInterval()
-    const operatorGrant = expired ? this.defaultGrant : {
-      stakeGrant: {},
-      validators: [operator.address],
-      maxTokens: maxTokens ? bignumber(maxTokens.amount) : null
-    };
-    this.setState((state, props) => ({
-      operatorGrants: _.set(
-        state.operatorGrants,
-        operator.botAddress,
-        operatorGrant
-      ),
       error: null,
       validatorLoading: _.set(state.validatorLoading, operator.address, false),
     }));
-    this.refreshInterval()
-  }
-
-  onRevoke(operator) {
-    this.clearRefreshInterval()
-    this.setState((state, props) => ({
-      operatorGrants: _.set(
-        state.operatorGrants,
-        operator.botAddress,
-        this.defaultGrant
-      ),
-      error: null,
-      validatorLoading: _.set(state.validatorLoading, operator.address, false),
-    }));
-    this.refreshInterval()
+    this.props.onRevoke(grantAddress, msgTypes)
   }
 
   onClaimRewards() {
@@ -313,12 +272,6 @@ class Delegations extends React.Component {
 
   authzSupport() {
     return this.props.network.authzSupport
-  }
-
-  orderedOperators() {
-    const { delegations, operators } = this.props
-    if(!delegations) return operators
-    return _.sortBy(operators, ({ address }) => delegations[address] ? -1 : 0)
   }
 
   operatorGrants() {
@@ -413,11 +366,13 @@ class Delegations extends React.Component {
         undelegate={validatorModal.undelegate}
         network={this.props.network}
         address={this.props.address}
+        wallet={this.props.wallet}
         validators={this.props.validators}
         validatorApy={this.state.validatorApy}
         operators={this.props.operators}
         balance={this.props.balance}
         rewards={this.state.rewards}
+        commission={this.state.commission}
         delegations={this.state.delegations || {}}
         grants={this.operatorGrants()}
         authzSupport={this.authzSupport()}
@@ -458,8 +413,8 @@ class Delegations extends React.Component {
                 variant="warning"
                 dismissible={false}
               >
-                <p>Ledger devices are not supported in the REStake UI currently. Support will be added as soon as it is possible.</p>
-                <p className="mb-0"><span onClick={() => this.setState({ showAboutLedger: true })} role="button" className="text-reset text-decoration-underline">A manual workaround is possible using the CLI</span></p>
+                <p>Ledger devices can't send Authz transactions just yet. Full support will be enabled as soon as it is possible.</p>
+                <p className="mb-0"><span onClick={() => this.setState({ showAboutLedger: true })} role="button" className="text-reset text-decoration-underline">A manual workaround is possible using the CLI.</span></p>
               </AlertMessage>
             </>
           )}
@@ -477,13 +432,16 @@ class Delegations extends React.Component {
           <Validators 
             network={this.props.network}
             address={this.props.address}
+            wallet={this.props.wallet}
             validators={this.props.validators}
             operators={this.props.operators}
             validatorApy={this.state.validatorApy}
             delegations={this.state.delegations || {}}
             rewards={this.state.rewards}
+            commission={this.state.commission}
             stargateClient={this.props.stargateClient}
             validatorLoading={this.state.validatorLoading}
+            isLoading={this.props.wallet && (!this.state.delegations || (this.props.network?.authzSupport && !this.props.grants?.granter))}
             operatorGrants={this.operatorGrants()}
             authzSupport={this.authzSupport()}
             restakePossible={this.restakePossible()}
@@ -519,6 +477,7 @@ class Delegations extends React.Component {
                       <ClaimRewards
                         network={this.props.network}
                         address={this.props.address}
+                        wallet={this.props.wallet}
                         validatorRewards={this.validatorRewards()}
                         stargateClient={this.props.stargateClient}
                         onClaimRewards={this.onClaimRewards}
@@ -529,6 +488,7 @@ class Delegations extends React.Component {
                         restake={true}
                         network={this.props.network}
                         address={this.props.address}
+                        wallet={this.props.wallet}
                         validatorRewards={this.validatorRewards()}
                         stargateClient={this.props.stargateClient}
                         onClaimRewards={this.onClaimRewards}
